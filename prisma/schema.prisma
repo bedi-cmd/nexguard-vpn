@@ -1,0 +1,234 @@
+// Prisma schema for VPN Website (VPNResellers white-label).
+// Single source of truth for all database tables.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ───── Enums ─────
+
+enum Role {
+  USER
+  ADMIN
+}
+
+enum VpnAccountStatus {
+  ACTIVE
+  SUSPENDED
+  TERMINATED
+}
+
+enum VpnProtocol {
+  WIREGUARD
+  OPENVPN_TCP
+  OPENVPN_UDP
+  IKEV2
+  STEALTH
+  L2TP
+}
+
+enum SubscriptionPlan {
+  MONTHLY
+  YEARLY
+  LIFETIME
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  TRIALING
+  PAST_DUE
+  CANCELLED
+  INCOMPLETE
+  EXPIRED
+}
+
+// ───── App users ─────
+
+model User {
+  id            String    @id @default(uuid()) @db.Uuid
+  email         String    @unique
+  passwordHash  String?   @map("password_hash")
+  name          String?
+  image         String?
+  totpSecret    String?   @map("totp_secret")
+  totpEnabled   Boolean   @default(false) @map("totp_enabled")
+  emailVerified DateTime? @map("email_verified")
+  role          Role      @default(USER)
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+
+  accounts       Account[]
+  sessions       Session[]
+  vpnAccounts    VpnAccount[]
+  subscriptions  Subscription[]
+  payments       Payment[]
+  auditLogs      AuditLog[]
+  passwordResets PasswordResetToken[]
+  verifications  EmailVerificationToken[]
+
+  @@map("users")
+}
+
+// ───── NextAuth tables (OAuth providers) ─────
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String  @map("user_id") @db.Uuid
+  type              String
+  provider          String
+  providerAccountId String  @map("provider_account_id")
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@map("accounts")
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique @map("session_token")
+  userId       String   @map("user_id") @db.Uuid
+  expires      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("sessions")
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+  @@map("verification_tokens")
+}
+
+// ───── Email verification + password reset (separate from NextAuth's table) ─────
+
+model EmailVerificationToken {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @map("user_id") @db.Uuid
+  token     String    @unique
+  expiresAt DateTime  @map("expires_at")
+  usedAt    DateTime? @map("used_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("email_verification_tokens")
+}
+
+model PasswordResetToken {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @map("user_id") @db.Uuid
+  token     String    @unique
+  expiresAt DateTime  @map("expires_at")
+  usedAt    DateTime? @map("used_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("password_reset_tokens")
+}
+
+// ───── VPN accounts (mapped to VPNResellers) ─────
+
+model VpnAccount {
+  id             String           @id @default(uuid()) @db.Uuid
+  userId         String           @map("user_id") @db.Uuid
+  vpnResellersId String           @unique @map("vpnresellers_id")
+  vpnUsername    String           @map("vpn_username")
+  vpnPasswordEnc String           @map("vpn_password_enc")
+  status         VpnAccountStatus @default(ACTIVE)
+  protocolPref   VpnProtocol      @default(WIREGUARD) @map("protocol_pref")
+  maxDevices     Int              @default(5) @map("max_devices")
+  createdAt      DateTime         @default(now()) @map("created_at")
+  updatedAt      DateTime         @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("vpn_accounts")
+}
+
+// ───── Subscriptions (Stripe) ─────
+
+model Subscription {
+  id                String             @id @default(uuid()) @db.Uuid
+  userId            String             @map("user_id") @db.Uuid
+  stripeSubId       String?            @unique @map("stripe_sub_id")
+  stripeCustomerId  String?            @map("stripe_customer_id")
+  plan              SubscriptionPlan
+  status            SubscriptionStatus @default(ACTIVE)
+  currentPeriodEnd  DateTime?          @map("current_period_end")
+  cancelAtPeriodEnd Boolean            @default(false) @map("cancel_at_period_end")
+  createdAt         DateTime           @default(now()) @map("created_at")
+  updatedAt         DateTime           @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([stripeCustomerId])
+  @@map("subscriptions")
+}
+
+// ───── Payments (Stripe audit trail) ─────
+
+model Payment {
+  id              String   @id @default(uuid()) @db.Uuid
+  userId          String   @map("user_id") @db.Uuid
+  stripePaymentId String?  @unique @map("stripe_payment_id")
+  amountCents     Int      @map("amount_cents")
+  currency        String   @default("usd")
+  status          String
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@map("payments")
+}
+
+// ───── Stripe event idempotency ─────
+
+model StripeEvent {
+  id          String   @id
+  type        String
+  processedAt DateTime @default(now()) @map("processed_at")
+
+  @@map("stripe_events")
+}
+
+// ───── Audit log (append-only) ─────
+
+model AuditLog {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String?  @map("user_id") @db.Uuid
+  action    String
+  target    String?
+  ipHash    String?  @map("ip_hash")
+  metadata  Json?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([action])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
